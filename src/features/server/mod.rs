@@ -6,11 +6,12 @@ use std::io::{Read, Seek, SeekFrom};
 use clap::Parser;
 use websocket::{Message, OwnedMessage};
 use crate::common;
-use crate::features::commands::{self, CommandData, CommandMessage, DirItem, WebSocketCommand};
+use crate::features::commands::{self, CommandData, CommandMessage, DirItem, ApiCommand};
 
 use super::commands::FtPath;
 
 mod cli_command;
+mod command_handler;
 
 
 pub fn main() {
@@ -20,7 +21,7 @@ pub fn main() {
     let mut config = config::Config::new(
         Some(utils::config_dir()), 
         Some(config::FILE_TUNNEL_CFG_SERVER.to_string()),
-        None
+        Some(config::FILE_TUNNEL_ENDPOINT_SERVER.to_string()),
     );
     config.init();
     match &cli.command {
@@ -142,137 +143,35 @@ pub fn main() {
                             } else {
                                 println!("txt: {}", txt);
                             }
-                            let cmd: Result<WebSocketCommand, serde_json::Error> = serde_json::from_str(&txt);
-                            let root_path = config.get_key(config::CFG_PATH.to_string()).unwrap();
-                            match cmd {
-                                Ok(cmd) => {
-                                    match &cmd.command {
-                                        commands::Command::ReadConfig {  } => {
-                                            let data = CommandMessage {
-                                                version: cmd.version,
-                                                status: 0,
-                                                data: CommandData::ReadConfig { path: "/".to_string() }
-                                            };
-                                            let _ = tx1.send(OwnedMessage::Text(serde_json::to_string(&data).unwrap()));
-                                        }
-                                        commands::Command::ReadDirItem { dir_path, take_size, skip_size } => {
-                                            let mut dir_path = dir_path.clone();
-                                            let org_root_path = dir_path.root_path().clone();
-                                            dir_path.reset_root(&root_path);
-                                            let total = dir_iter(&dir_path).count();
-                                            let dir_items: Vec<DirItem> = dir_iter(&dir_path)
-                                                .skip(*skip_size).take(*take_size)
-                                                .map(|dir| {
-                                                    build_item(
-                                                            dir.unwrap().path().to_str().unwrap(),
-                                                            &root_path,
-                                                            &org_root_path
-                                                        )
-                                                    }
-                                                ).collect();
-                                            let data = CommandMessage {
-                                                version: cmd.version,
-                                                status: 0,
-                                                data: CommandData::ReadDirItem {
-                                                    items: dir_items,
-                                                    total: total,
-                                                    taked_size: min(*take_size + *skip_size, total),
-                                                }
-                                            };
-                                            
-                                            let _ = tx1.send(OwnedMessage::Text(serde_json::to_string(&data).unwrap()));
-                                        }
-                                        commands::Command::ReadFileInfo { file_path } => {
-                                            let mut file_path = file_path.clone();
-                                            let org_root_path = file_path.root_path().clone();
-                                            file_path.reset_root(&root_path);
-
-                                            let message = CommandMessage {
-                                                version: cmd.version,
-                                                status: 0,
-                                                data: CommandData::ReadFileInfo {
-                                                    item: build_item(&file_path.full_path(), &root_path, &org_root_path)
-                                                },
-                                            };
-                                            
-                                            let _ = tx1.send(OwnedMessage::Text(serde_json::to_string(&message).unwrap()));
-                                        }
-                                        commands::Command::DownloadFile { 
-                                            file_path, block_idx, block_size
-                                        } => {
-                                            let mut file_path = file_path.clone();
-                                            file_path.reset_root(&root_path);
-                                            let mut f = fs::File::open(file_path.full_path()).unwrap();
-                                            if *block_idx > 0 {
-                                                let _seek_size = f.seek(SeekFrom::Start(((*block_idx) * (*block_size)) as u64)).unwrap();
-                                            }
-                                            let mut buffer: Vec<u8> = vec![0u8; *block_size];
-                                            let real_size = f.read(&mut buffer).unwrap();
-
-                                            let data = CommandMessage {
-                                                version: cmd.version,
-                                                status: 0,
-                                                data: CommandData::DownloadFile { 
-                                                    data: buffer[..real_size].to_vec(),
-                                                    data_size: real_size,
-                                                }
-                                            };
-                                            let _ = tx1.send(OwnedMessage::Text(serde_json::to_string(&data).unwrap()));
+                            match txt.split_once(":") {
+                                Some((client_key_size_str, next_data)) => {
+                                    let client_key_size: usize = client_key_size_str.to_string().parse().unwrap();
+                                    let client_key = next_data[..client_key_size].to_string();
+                                    let next_data = next_data[client_key_size..].to_string();
+                                    let cmd: Result<ApiCommand, serde_json::Error> = serde_json::from_str(&next_data);
+                                    let root_path = config.get_key(config::CFG_PATH.to_string()).unwrap();
+                                    match cmd {
+                                        Ok(cmd) => {
+                                            command_handler::handler(&tx1, root_path.as_str(), client_key.as_str(), &cmd);
+                                            let mut msg = vec![client_key_size as u8];
+                                            let chars: Vec<u8> = client_key.chars().map(|c| c as u8).collect();
+                                            msg.extend(chars.iter());
+                                            msg.extend(vec![0u8;4]);
+                                            eprintln!("bin_msg: {:?}", msg);
+                                            let _ = tx1.send(OwnedMessage::Binary(msg)).unwrap();
                                         },
-                                        commands::Command::ReadPathInfo { path, take_size, skip_size } => {
-                                            let mut path = path.clone();
-                                            let org_root_path = path.root_path().clone();
-                                            path.reset_root(&root_path);
-                                            let res_data = match fs::metadata(path.full_path()) {
-                                                Ok(meta) => {
-                                                    if meta.is_file() {
-                                                        CommandData::ReadFileInfo { 
-                                                            item: build_item(
-                                                                &path.full_path(),
-                                                                &root_path,
-                                                                &org_root_path
-                                                            )
-                                                        }
-                                                    } else if meta.is_dir() {
-                                                        let total_count = dir_iter(&path).count();
-                                                        CommandData::ReadDirItem { 
-                                                            items: dir_iter(&path).skip(*skip_size)
-                                                                .take(*take_size)
-                                                                .map(|dir| {
-                                                                    build_item(
-                                                                        dir.unwrap().path().to_str().unwrap(),
-                                                                        &root_path,
-                                                                        &org_root_path
-                                                                    )
-                                                                })
-                                                                .collect(),
-                                                            total: total_count,
-                                                            taked_size: min(*take_size + *skip_size, total_count)
-                                                        }
-                                                    } else {
-                                                        CommandData::Error { message: "todo next".to_string() }
-                                                    }
-                                                },
-                                                Err(err) => CommandData::Error { message: err.to_string() }
-                                            };
-
-                                            let res = CommandMessage {
-                                                version: cmd.version,
-                                                status: 0,
-                                                data: res_data,
-                                            };
-                                            let _ = tx1.send(OwnedMessage::Text(serde_json::to_string(&res).unwrap()));
-                                        },
-                                        _ => {
-                                            println!("cannot support comand:{cmd:#?}");
+                                        Err(e) => {
+                                            let mut msg = vec![client_key_size as u8];
+                                            let chars: Vec<u8> = client_key.chars().map(|c| c as u8).collect();
+                                            msg.extend(chars.iter());
+                                            msg.extend(vec![0u8;4]);
+                                            eprintln!("bin_msg 111: {:?}", msg);
+                                            println!("cmd parse failed, err:{e}, txt: {txt}");
+                                            let _ = tx1.send(OwnedMessage::Binary(vec![0u8; 4])).unwrap();
                                         }
                                     }
-                                    let _ = tx1.send(OwnedMessage::Binary(vec![0u8; 4])).unwrap();
                                 },
-                                Err(e) => {
-                                    println!("cmd parse failed, err:{e}, txt: {txt}");
-                                    let _ = tx1.send(OwnedMessage::Binary(vec![0u8; 4])).unwrap();
-                                }
+                                None => {}
                             }
                         }
                     }

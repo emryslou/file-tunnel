@@ -5,94 +5,142 @@ use lazy_static::lazy_static;
 use std::collections::HashMap;
 
 use tide_websockets::WebSocketConnection;
+use crate::common::CommomResult;
 
 type ShareKey = String;
+type RequestSender = Sender<Vec<u8>>;
+type RequestReceiver = Receiver<Vec<u8>>;
+type RequestChannel = (RequestSender, RequestReceiver);
 
 struct WebSocketChannel {
     ws_conn: WebSocketConnection,
-    proxy: (Sender<Vec<u8>>, Receiver<Vec<u8>>)
+    proxy: HashMap<ShareKey, RequestChannel>
 }
 
 pub enum WSChannelSendType {
-    Byte(Vec<u8>),
-    String(String)
+    Byte(Vec<u8>, Vec<u8>),
+    String(String, String)
 }
 
 impl WebSocketChannel {
-    pub fn receiver(&self) -> Option<Receiver<Vec<u8>>> {
-        Some(self.proxy.1.clone())
+    pub fn proxy_receive(&self, client_key: &str) -> Option<&Receiver<Vec<u8>>> {
+        match self.proxy.get(client_key) {
+            None => None,
+            Some(proxy) => Some(&proxy.1)
+        }
     }
 
-    pub async fn proxy_send(&self, data: Vec<u8>) {
-        self.proxy.0.send(data).await.unwrap();
+    pub async fn proxy_send(&self, client_key: &str, data: Vec<u8>) -> CommomResult<()> {
+
+        if let Some(proxy) = self.proxy.get(client_key) {
+            proxy.0.send(data).await?;
+        } else {
+            eprintln!("send msg failed {:?}", client_key);
+        }
+        Ok(())
+    }
+
+    pub async fn proxy_add(&mut self, client_key: &str) {
+        if !self.proxy.contains_key(client_key) {
+            eprintln!("open true");
+            self.proxy.insert(client_key.to_string(), channel::unbounded());
+        } else {
+            eprintln!("open failed");
+        }
+    }
+
+    pub async fn proxy_del(&mut self, client_key: &str) {
+        if self.proxy.contains_key(client_key) {
+            self.proxy.remove(client_key);
+        }
+    }
+
+    pub async fn proxy_status(&self, client_key: &str) -> bool {
+        self.proxy.contains_key(client_key)
     }
 
     pub async fn websocket_send(&self, send_type: WSChannelSendType) {
         match send_type {
-            WSChannelSendType::Byte(data) => self.ws_conn.send_bytes(data).await.unwrap(),
-            WSChannelSendType::String(s) => self.ws_conn.send_string(s).await.unwrap(),
+            WSChannelSendType::Byte(client_key, data) => {
+                let mut msg = vec![client_key.len() as u8];
+                msg.extend(client_key);
+                msg.extend(data);
+                self.ws_conn.send_bytes(msg).await.unwrap()
+            },
+            WSChannelSendType::String(client_key, s) => {
+                let msg = format!("{}:{}{}", client_key.len(), client_key, s);
+                self.ws_conn.send_string(msg).await.unwrap()
+            },
         }
     }
 }
 
 struct WebSocketChannelPool {
     inner: HashMap<String, WebSocketChannel>,
-    proxy_share_keys: Vec<String>,
 }
 
 impl WebSocketChannelPool {
     pub fn new() -> Self {
         Self {
-            inner: HashMap::new(),
-            proxy_share_keys: vec![],
+            inner: HashMap::new()
         }
     }
 }
 
 impl WebSocketChannelPool {
-    pub fn add(&mut self, key: String, conn: WebSocketConnection) {
-        let (send, recv) = channel::unbounded();
-
-        self.inner.insert(key, WebSocketChannel{ws_conn: conn, proxy: (send, recv)});
+    pub fn add(&mut self, key: &str, conn: WebSocketConnection) {
+        self.inner.insert(key.to_string(), WebSocketChannel{ws_conn: conn, proxy: HashMap::new()});
     }
 
-    pub fn get(&self, key: &String) -> Option<&WebSocketChannel> {
+    pub fn get(&self, key: &str) -> Option<&WebSocketChannel> {
         self.inner.get(key)
     }
 
-    pub fn del(&mut self, key: &String) {
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut WebSocketChannel> {
+        self.inner.get_mut(key)
+    }
+
+    pub fn del(&mut self, key: &str) {
         self.inner.remove(key);
     }
 
-    pub fn receiver(&self, key: &String) -> Option<Receiver<Vec<u8>>> {
-        match self.get(&key) {
-            Some(ws_channel) => ws_channel.receiver(),
+    pub fn proxy_receiver(&self, server_key: &str, client_key: &str) -> Option<&Receiver<Vec<u8>>> {
+        match self.get(server_key) {
+            Some(ws_channel) => ws_channel.proxy_receive(client_key),
             None => None,
         }
     }
 
-    pub async fn send(&mut self, share_key: &String, data: Vec<u8>) {
-        match self.get(share_key) {
-            Some(ws_channel) => ws_channel.proxy_send(data).await,
-            None => {},
+    pub async fn proxy_send(&mut self, server_key: &str, client_key: &str, data: Vec<u8>) -> CommomResult<()> {
+        match self.get(server_key) {
+            Some(ws_channel) => ws_channel.proxy_send(client_key, data).await,
+            None => Ok(()),
         }
     }
 
-    pub async fn proxy_open(&mut self, share_key: &String) {
-        self.proxy_share_keys.push(share_key.clone());
-    }
-
-    pub async fn proxy_close(&mut self, share_key: &String) {
-        if self.proxy_status(&share_key).await {
-            self.proxy_share_keys = self.proxy_share_keys.iter()
-                        .filter(|psk| *psk == share_key)
-                        .map(|psk|psk.clone())
-                        .collect();
+    pub async fn proxy_open(&mut self, server_key: &str, client_key: &str) {
+        match self.get_mut(server_key) {
+            Some(ws_channel) => {
+                println!("oh ....");
+                ws_channel.proxy_add(client_key).await;
+            },
+            None => {
+                eprintln!("open proxy failed");
+            },
         }
     }
 
-    pub async fn proxy_status(&self, share_key: &String) -> bool {
-        self.proxy_share_keys.contains(share_key)
+    pub async fn proxy_close(&mut self, server_key: &str, client_key: &str) {
+        if self.proxy_status(server_key, client_key).await {
+            self.get_mut(server_key).unwrap().proxy_del(client_key);
+        }
+    }
+
+    pub async fn proxy_status(&self, server_key: &str, client_key: &str) -> bool {
+        match self.get(server_key) {
+            Some(ws_channel) => ws_channel.proxy_status(client_key).await,
+            None => false
+        }
     }
 }
 
@@ -100,47 +148,48 @@ lazy_static! {
     static ref WS_CHANNEL: Mutex<Box<WebSocketChannelPool>> = Mutex::new(Box::new(WebSocketChannelPool::new()));
 }
 
-pub async fn add(share_key: String, conn: WebSocketConnection) {
-    WS_CHANNEL.lock().await.add(share_key, conn);
+pub async fn add(server_key: &str, conn: WebSocketConnection) {
+    WS_CHANNEL.lock().await.add(server_key, conn);
 }
 
-pub async fn get(share_key: &String) -> Option<WebSocketConnection> {
-    match WS_CHANNEL.lock().await.get(share_key) {
+pub async fn get(server_key: &str) -> Option<WebSocketConnection> {
+    match WS_CHANNEL.lock().await.get(server_key) {
         Some(ws_chann) => Some(ws_chann.ws_conn.clone()),
         None => None,
     }
 }
 
-pub async fn del(share_key: &String) {
-    WS_CHANNEL.lock().await.del(share_key);
+pub async fn del(server_key: &str) {
+    WS_CHANNEL.lock().await.del(server_key);
 }
 
-pub async fn proxy_open(share_key: &String) {
-    WS_CHANNEL.lock().await.proxy_open(share_key).await;
+pub async fn proxy_open(server_key: &str, client_key: &str) {
+    WS_CHANNEL.lock().await.proxy_open(server_key, client_key).await;
 }
 
-pub async fn proxy_close(share_key: &String) {
-    WS_CHANNEL.lock().await.proxy_close(share_key).await;
+pub async fn proxy_close(server_key: &str, client_key: &str) {
+    WS_CHANNEL.lock().await.proxy_close(server_key, client_key).await;
 }
 
-pub async fn proxy_receive(share_key: &String) -> Option<Receiver<Vec<u8>>> {
-    if WS_CHANNEL.lock().await.proxy_status(share_key).await {
-        return WS_CHANNEL.lock().await.receiver(share_key);
+pub async fn proxy_receive<'a, 'b>(server_key: &'a str, client_key: &'a str) -> Option<Receiver<Vec<u8>>> {
+    match WS_CHANNEL.lock().await.proxy_receiver(server_key, client_key) {
+        None => None,
+        Some(r) => Some(r.clone())
     }
-    None
 }
 
-pub async fn proxy_send(share_key: &String, message: Vec<u8>) -> Result<(), channel::SendError<Vec<u8>>> {
-    if WS_CHANNEL.lock().await.proxy_status(share_key).await {
-        WS_CHANNEL.lock().await.send(share_key, message).await;
-    }
-    Ok(())
+pub async fn proxy_send(server_key: &str, client_key: &str, message: Vec<u8>) -> CommomResult<()> {
+    WS_CHANNEL.lock().await.proxy_send(server_key, client_key, message).await
 }
 
-pub async fn websocket_send_bytes(share_key: &String, message: Vec<u8>) {
-    WS_CHANNEL.lock().await.get(share_key).unwrap().websocket_send(WSChannelSendType::Byte(message)).await;
+pub async fn websocket_send_bytes(server_key: &str, client_key: &str, message: Vec<u8>) {
+    WS_CHANNEL.lock().await
+        .get(server_key).unwrap()
+        .websocket_send(WSChannelSendType::Byte(client_key.as_bytes().to_vec(), message)).await;
 }
 
-pub async fn websocket_send_text(share_key: &String, message: String) {
-    WS_CHANNEL.lock().await.get(share_key).unwrap().websocket_send(WSChannelSendType::String(message)).await;
+pub async fn websocket_send_text(server_key: &str, client_key: &str, message: String) {
+    WS_CHANNEL.lock().await
+        .get(server_key).unwrap()
+        .websocket_send(WSChannelSendType::String(client_key.to_string(), message)).await;
 }

@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 
 use crate::{
-    common::{config::{self, Config, CFG_PATH}, utils}, 
-    features::commands::{self, CommandData, FtPath, WebSocketCommand},
+    common::{config::{self, Config, CFG_PATH}, gen_uuid, utils}, 
+    features::commands::{self, CommandData, FtPath, ApiCommand},
 };
 
 mod api;
@@ -17,7 +17,7 @@ pub fn main() {
     let mut cli_config = Config::new(
         Some(utils::config_dir().to_string()), 
         Some(config::FILE_TUNNEL_CFG_CLIENT.to_string()),
-        None,
+        Some(config::FILE_TUNNEL_ENDPOINT_CLIENT.to_string()),
     );
     cli_config.init();
     if let Some(cmd) = &cli.command {
@@ -32,6 +32,7 @@ pub fn main() {
                 cli_config.set(config::CFG_PATH.to_string(), save_path.clone(), None);
                 cli_config.set(config::CFG_TUNNEL_HOST.to_string(), tunnel_host.clone(), None);
                 cli_config.set(config::CFG_SHARE_KEY.to_string(), share_key.clone(), None);
+                cli_config.set(config::CFG_CLIENT_KEY.to_string(), gen_uuid(), None);
                 if let Some(password) = password {
                     cli_config.set(config::CFG_PASSWORD.to_string(), password.clone(), None);
                 }
@@ -61,7 +62,7 @@ pub fn main() {
                 }).collect();
             }
             cli_enum::ReadServerConfig {  } => {
-                let cmd = WebSocketCommand {
+                let cmd = ApiCommand {
                     version: 1,
                     command: commands::Command::ReadConfig {  }
                 };
@@ -84,7 +85,7 @@ pub fn main() {
             },
             cli_enum::ReadFileInfo { file_path } => {
                 let root_path = cli_config.get_key(CFG_PATH.to_string()).unwrap_or("/".to_string());
-                let cmd = WebSocketCommand {
+                let cmd = ApiCommand {
                     version: 1,
                     command: commands::Command::ReadFileInfo { 
                         file_path: FtPath::new_relative(root_path, file_path.clone()),
@@ -103,7 +104,7 @@ pub fn main() {
             },
             cli_enum::DownloadFile { file_path, block_size, block_idx } => {
                 let root_path = cli_config.get_key(CFG_PATH.to_string()).unwrap_or("/".to_string());
-                let cmd = WebSocketCommand {
+                let cmd = ApiCommand {
                     version: 1,
                     command: commands::Command::DownloadFile { 
                         file_path: FtPath::new_relative(root_path, file_path.clone()),

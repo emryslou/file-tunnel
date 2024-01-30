@@ -29,11 +29,11 @@ async fn registe_share_key(mut req: Request<()>) -> tide::Result {
 }
 
 async fn srv_ws_handler(req: Request<()>, mut stream: WebSocketConnection) -> tide::Result<()> {
-    let mut share_key = String::from("");
+    let mut share_key = "";
     match req.header("X-Share-Key") {
         Some(_share_key) => {
-            share_key = _share_key.get(0).unwrap().to_string();
-            websocket_channel::add(share_key.clone(), stream.clone()).await;
+            share_key = _share_key.get(0).unwrap().as_str();
+            websocket_channel::add(share_key, stream.clone()).await;
         },
         None => {}
     };
@@ -47,10 +47,20 @@ async fn srv_ws_handler(req: Request<()>, mut stream: WebSocketConnection) -> ti
                         Ok(message) => {
                             match message {
                                 Message::Text(input) => {
-                                    websocket_channel::proxy_send(&share_key, input.into_bytes()).await.unwrap();
+                                    let (client_key_size_str, next_data) = input.split_once(":").unwrap();
+                                    let client_key_size = client_key_size_str.to_string().parse::<usize>().unwrap();
+                                    let (client_key, next_data) = next_data.split_at(client_key_size);
+                                    println!("transfer text: {},{}:{}", share_key, client_key, &next_data);
+                                    websocket_channel::proxy_send(share_key, client_key, next_data.as_bytes().to_vec()).await.unwrap();
                                 },
                                 Message::Binary(input) => {
-                                    websocket_channel::proxy_send(&share_key, input).await.unwrap();
+                                    println!("raw_msg: {:?}", input);
+                                    let client_key_size = input[0] as usize;
+                                    let client_key_chars: Vec<char> = input[1..(client_key_size + 1)].iter().map(|c| *c as char).collect();
+                                    let client_key = String::from_iter(client_key_chars);
+                                    let msg = input[(client_key_size + 1)..].to_vec();
+                                    println!("transfer: {},{}:{}", share_key, client_key, String::from_utf8(msg.clone()).unwrap());
+                                    websocket_channel::proxy_send(&share_key, &client_key, msg).await.unwrap();
                                 }
                                 Message::Close(_static) => {
                                     println!("exit {}", &share_key);

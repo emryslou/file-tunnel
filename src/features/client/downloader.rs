@@ -3,7 +3,7 @@ use std::{fs, io::{Seek, SeekFrom, Write}, path::PathBuf};
 
 use crate::{
     common::{config::{Config, CFG_PATH}, utils, CommomResult},
-    features::commands::{Command, CommandData, DirItem, DirItemInfo, FtPath, WebSocketCommand}
+    features::commands::{Command, CommandData, DirItem, DirItemInfo, FtPath, ApiCommand}
 };
 
 use super::api;
@@ -11,7 +11,7 @@ use super::api;
 
 pub fn download(cli_config: &mut Config, path: PathBuf, take_size: usize, skip_size: usize, download: bool) -> CommomResult<()> {
     let root_path = cli_config.get_key(CFG_PATH.to_string()).unwrap();
-    let cmd = WebSocketCommand {
+    let cmd = ApiCommand {
         version: 1,
         command: Command::ReadPathInfo {
             path: FtPath::new_absolute(root_path, path.to_str().unwrap().to_string()),
@@ -70,7 +70,7 @@ fn downloader(cli_config: &mut Config, item: &DirItem) -> CommomResult<()> {
             let max_err_retry_times = 3;
             let mut err_times = max_err_retry_times;
             while block_idx < block_count {
-                let cmd = WebSocketCommand {
+                let cmd = ApiCommand {
                     version: 1,
                     command: Command::DownloadFile {
                         file_path: item.path.clone(),

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 #[derive(Debug)]
-pub struct WebSocketCommand {
+pub struct ApiCommand {
     pub version: u16,
     pub command: Command
 }
@@ -257,11 +257,11 @@ pub enum ModfiedType {
 mod test_commands {
     use crate::features::commands::{FtPath, ModfiedType};
 
-    use super::{Command, WebSocketCommand};
+    use super::{Command, ApiCommand};
 
     #[test]
     fn se_commands() {
-        let cmd = WebSocketCommand {
+        let cmd = ApiCommand {
             version: 1,
             command: Command::ModifiedFile { path: FtPath::new_absolute("".to_string(), "".to_string()), m_type: ModfiedType::Content }
         };
@@ -273,7 +273,7 @@ mod test_commands {
     fn de_commands() {
         let s = r#"{"version":1,"command":{"ModifiedFile":{"path":"","m_type":"Content"}}}"#;
         
-        let cmd: WebSocketCommand = serde_json::from_str(s).unwrap();
+        let cmd: ApiCommand = serde_json::from_str(s).unwrap();
         println!("{cmd:#?}");
 
     }

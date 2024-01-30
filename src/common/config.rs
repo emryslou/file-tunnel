@@ -20,9 +20,16 @@ pub const CFG_PATH: &str = "path";
 pub const CFG_TUNNEL_HOST: &str = "tunnel_host";
 pub const CFG_SHARE_KEY: &str = "share_key";
 pub const CFG_PASSWORD: &str = "password";
-const ALLOW_NAMES: [&str; 4] = [
+pub const CFG_CLIENT_KEY: &str = "client_id";
+const SERVER_ALLOW_NAMES: [&str; 4] = [
     CFG_PATH, CFG_TUNNEL_HOST, CFG_SHARE_KEY, CFG_PASSWORD,
 ];
+
+const CLIENT_ALLOW_NAMES: [&str; 5] = [
+    CFG_PATH, CFG_TUNNEL_HOST, CFG_SHARE_KEY, CFG_PASSWORD,
+    CFG_CLIENT_KEY,
+];
+
 
 pub struct Config {
     work_dir: String,
@@ -37,14 +44,27 @@ impl Config {
     pub fn new(
         work_dir: Option<String>,
         config_file: Option<String>,
-        _app_name: Option<String>
+        app_name: Option<String>
     ) -> Self {
         let work_dir = match work_dir {
             Some(work_dir) => work_dir,
             None => WORK_DIR.to_string(),
         };
-        let allowed_names: Vec<String> = ALLOW_NAMES.iter()
-                .map(|an| an.to_string()).collect();
+        
+        let allowed_names: Vec<String> = match app_name {
+            Some(app_name) => {
+                match app_name.as_str() {
+                    FILE_TUNNEL_ENDPOINT_CLIENT => CLIENT_ALLOW_NAMES
+                        .iter()
+                        .map(|an| an.to_string()).collect(),
+                    FILE_TUNNEL_ENDPOINT_SERVER => SERVER_ALLOW_NAMES
+                        .iter()
+                        .map(|an| an.to_string()).collect(),
+                    _ => todo!("todo {app_name}")
+                }
+            },
+            None => vec![],
+        };
         
         let config_file = if let Some(_config_file) = config_file {
             _config_file
