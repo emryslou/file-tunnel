@@ -1,4 +1,4 @@
-use std::io::Read as _;
+use std::{io::Read as _, time::Duration};
 use crate::{
     common::{config::{self, Config}, CommomResult},
     features::commands::{CommandMessage, ApiCommand}
@@ -32,6 +32,7 @@ pub fn do_http_request_raw(cli_config: &mut Config, cmd: &ApiCommand) -> CommomR
     let url_endpoint = format!("http://{}/{}", tunnel_host, "tunnel/v1/client/data");
     
     let mut res = http_cli.post(url_endpoint.clone())
+                .timeout(Duration::from_secs(120))
                 .header("X-Server-Key", share_key)
                 .header("X-Client-Key", client_key)
                 .body(body).send()?;

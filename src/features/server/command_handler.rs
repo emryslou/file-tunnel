@@ -1,28 +1,22 @@
 use std::{cmp::min, fs, io::{Read as _, Seek as _, SeekFrom}};
 
-use crate::features::commands::{self, ApiCommand, CommandData, CommandMessage, DirItem};
+use crate::{common::CommomResult, features::commands::{self, ApiCommand, CommandData, CommandMessage, DirItem}};
 use websocket::{Message, OwnedMessage};
 use std::sync::mpsc::Sender;
 
 use super::{build_item, dir_iter};
 
-pub fn handler(tx1: &Sender<OwnedMessage>, root_path: &str, client_key: &str, cmd: &ApiCommand) {
+pub fn handler(tx1: &Sender<OwnedMessage>, root_path: &str, client_key: &str, cmd: &ApiCommand) -> CommomResult<()> {
     match &cmd.command {
         commands::Command::ReadConfig {} => {
-            let data = CommandMessage {
+            let message = CommandMessage {
                 version: cmd.version,
                 status: 0,
                 data: CommandData::ReadConfig {
                     path: "/".to_string(),
                 },
             };
-            let msg = format!(
-                "{}:{}{}",
-                &client_key.len(),
-                &client_key,
-                serde_json::to_string(&data).unwrap()
-            );
-            let _ = tx1.send(OwnedMessage::Text(msg));
+            send_message_text(tx1, client_key, message)?;
         }
         commands::Command::ReadDirItem {
             dir_path,
@@ -44,7 +38,7 @@ pub fn handler(tx1: &Sender<OwnedMessage>, root_path: &str, client_key: &str, cm
                     )
                 })
                 .collect();
-            let data = CommandMessage {
+            let message = CommandMessage {
                 version: cmd.version,
                 status: 0,
                 data: CommandData::ReadDirItem {
@@ -53,13 +47,7 @@ pub fn handler(tx1: &Sender<OwnedMessage>, root_path: &str, client_key: &str, cm
                     taked_size: min(*take_size + *skip_size, total),
                 },
             };
-            let msg = format!(
-                "{}:{}{}",
-                &client_key.len(),
-                &client_key,
-                serde_json::to_string(&data).unwrap()
-            );
-            let _ = tx1.send(OwnedMessage::Text(msg));
+            send_message_text(tx1, client_key, message)?;
         }
         commands::Command::ReadFileInfo { file_path } => {
             let mut file_path = file_path.clone();
@@ -73,15 +61,7 @@ pub fn handler(tx1: &Sender<OwnedMessage>, root_path: &str, client_key: &str, cm
                     item: build_item(&file_path.full_path(), &root_path, &org_root_path),
                 },
             };
-
-            let msg = format!(
-                "{}:{}{}",
-                &client_key.len(),
-                &client_key,
-                serde_json::to_string(&message).unwrap()
-            );
-            println!("send msg: {}", msg);
-            let _ = tx1.send(OwnedMessage::Text(msg));
+            send_message_text(tx1, client_key, message)?;
         }
         commands::Command::DownloadFile {
             file_path,
@@ -90,14 +70,13 @@ pub fn handler(tx1: &Sender<OwnedMessage>, root_path: &str, client_key: &str, cm
         } => {
             let mut file_path = file_path.clone();
             file_path.reset_root(&root_path);
-            let mut f = fs::File::open(file_path.full_path()).unwrap();
+            let mut f = fs::File::open(file_path.full_path())?;
             if *block_idx > 0 {
                 let _seek_size = f
-                    .seek(SeekFrom::Start(((*block_idx) * (*block_size)) as u64))
-                    .unwrap();
+                    .seek(SeekFrom::Start(((*block_idx) * (*block_size)) as u64))?;
             }
             let mut buffer: Vec<u8> = vec![0u8; *block_size];
-            let real_size = f.read(&mut buffer).unwrap();
+            let real_size = f.read(&mut buffer)?;
 
             let message = CommandMessage {
                 version: cmd.version,
@@ -107,13 +86,7 @@ pub fn handler(tx1: &Sender<OwnedMessage>, root_path: &str, client_key: &str, cm
                     data_size: real_size,
                 },
             };
-            let msg = format!(
-                "{}:{}{}",
-                &client_key.len(),
-                &client_key,
-                serde_json::to_string(&message).unwrap()
-            );
-            let _ = tx1.send(OwnedMessage::Text(msg));
+            send_message_text(tx1, client_key, message)?;
         }
         commands::Command::ReadPathInfo {
             path,
@@ -162,16 +135,31 @@ pub fn handler(tx1: &Sender<OwnedMessage>, root_path: &str, client_key: &str, cm
                 status: 0,
                 data: res_data,
             };
-            let msg = format!(
-                "{}:{}{}",
-                &client_key.len(),
-                &client_key,
-                serde_json::to_string(&message).unwrap()
-            );
-            let _ = tx1.send(OwnedMessage::Text(msg));
+            send_message_text(tx1, client_key, message)?;
         }
         _ => {
             println!("cannot support comand:{cmd:#?}");
         }
     }
+    Ok(())
+}
+
+pub fn send_message_text(tx: &Sender<OwnedMessage>, client_key: &str, message: CommandMessage) -> CommomResult<()>{
+    let message = format!(
+        "{}:{}{}\0\0\0\0",
+        &client_key.len(),
+        &client_key,
+        serde_json::to_string(&message)?
+    );
+    tx.send(OwnedMessage::Text(message))?;
+    Ok(())
+}
+
+pub fn send_message_binary(tx: &Sender<OwnedMessage>, client_key: &str, message: Vec<u8>) -> CommomResult<()>{
+    let mut send_message: Vec<u8> = vec![client_key.len() as u8];
+    send_message.extend(client_key.as_bytes().to_vec());
+    send_message.extend(message.iter());
+    send_message.extend(vec![0u8; 4]);
+    tx.send(OwnedMessage::Binary(message))?;
+    Ok(())
 }

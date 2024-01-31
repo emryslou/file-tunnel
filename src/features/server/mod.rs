@@ -1,12 +1,11 @@
-use std::cmp::min;
 use std::fs::{self, ReadDir};
 use std::{sync::mpsc::channel, thread};
 
-use std::io::{Read, Seek, SeekFrom};
 use clap::Parser;
 use websocket::{Message, OwnedMessage};
 use crate::common;
-use crate::features::commands::{self, CommandData, CommandMessage, DirItem, ApiCommand};
+use crate::features::commands::{ApiCommand, CommandData, CommandMessage, DirItem};
+use crate::features::server::command_handler::send_message_text;
 
 use super::commands::FtPath;
 
@@ -138,36 +137,51 @@ pub fn main() {
                             println!(">bin: {:?}", bin);
                         }
                         OwnedMessage::Text(txt) => {
-                            if txt.len() > 50 {
-                                println!("txt: {}", &txt[..50]);
-                            } else {
-                                println!("txt: {}", txt);
-                            }
                             match txt.split_once(":") {
                                 Some((client_key_size_str, next_data)) => {
                                     let client_key_size: usize = client_key_size_str.to_string().parse().unwrap();
                                     let client_key = next_data[..client_key_size].to_string();
                                     let next_data = next_data[client_key_size..].to_string();
+                                    if next_data.len() > 50 {
+                                        println!("txt: {}", &next_data[..50]);
+                                    } else {
+                                        println!("txt: {}", next_data);
+                                    }
                                     let cmd: Result<ApiCommand, serde_json::Error> = serde_json::from_str(&next_data);
                                     let root_path = config.get_key(config::CFG_PATH.to_string()).unwrap();
                                     match cmd {
                                         Ok(cmd) => {
-                                            command_handler::handler(&tx1, root_path.as_str(), client_key.as_str(), &cmd);
-                                            let mut msg = vec![client_key_size as u8];
-                                            let chars: Vec<u8> = client_key.chars().map(|c| c as u8).collect();
-                                            msg.extend(chars.iter());
-                                            msg.extend(vec![0u8;4]);
-                                            eprintln!("bin_msg: {:?}", msg);
-                                            let _ = tx1.send(OwnedMessage::Binary(msg)).unwrap();
+                                            if let Err(e) = command_handler::handler(
+                                                &tx1, root_path.as_str(), 
+                                                client_key.as_str(),
+                                                &cmd
+                                            ) {
+                                                let message = CommandMessage {
+                                                    version: cmd.version,
+                                                    status: 500,
+                                                    data: CommandData::Error { message: e.to_string() },
+                                                };
+                                                send_message_text(
+                                                    &tx1, 
+                                                    client_key.as_str(),
+                                                    message
+                                                ).unwrap();
+                                            }
                                         },
                                         Err(e) => {
-                                            let mut msg = vec![client_key_size as u8];
-                                            let chars: Vec<u8> = client_key.chars().map(|c| c as u8).collect();
-                                            msg.extend(chars.iter());
-                                            msg.extend(vec![0u8;4]);
-                                            eprintln!("bin_msg 111: {:?}", msg);
                                             println!("cmd parse failed, err:{e}, txt: {txt}");
-                                            let _ = tx1.send(OwnedMessage::Binary(vec![0u8; 4])).unwrap();
+                                            let message = CommandMessage {
+                                                version: 0,
+                                                status: 404,
+                                                data: CommandData::Error { 
+                                                    message: format!("data parse error, message: {}", e.to_string()),
+                                                },
+                                            };
+                                            send_message_text(
+                                                &tx,
+                                                client_key.as_str(),
+                                                message
+                                            ).unwrap();
                                         }
                                     }
                                 },

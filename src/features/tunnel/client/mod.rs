@@ -10,6 +10,7 @@ pub fn binding(app: &mut tide::Server<()>) {
     app.at("/client").nest({
         let mut client = tide::new();
         client.at("/data").post(receive_data);
+        client.at("/proxy/close").get(proxy_close_expired);
         client
     });
 }
@@ -21,6 +22,7 @@ async fn receive_data(mut req: Request<()>) -> tide::Result {
     let client_key = if let Some(client_keys) = req.header("X-Client-Key") {
          client_keys.get(0).unwrap().to_string()
     } else { "".to_string() };
+    println!("host: {}", req.host().unwrap());
     
     let mut res = tide::Response::new(401);
     match (server_key.as_str(), client_key.as_str()) {
@@ -57,6 +59,14 @@ async fn receive_data(mut req: Request<()>) -> tide::Result {
     Ok(res)
 }
 
+async fn proxy_close_expired(mut _req: Request<()>) -> tide::Result {
+    if let Some(server_keys) = _req.header("X-Server-Key") {
+         server_keys.get(0).unwrap().to_string()
+    } else { "".to_string() };
+    websocket_channel::proxy_close_expired().await;
+    Ok("".into())
+}
+
 async fn recv_loop(res: &mut tide::Response, server_key: &str, client_key: &str) {
     let mut body: Vec<char> = vec![];
     if let Some(receiver) = websocket_channel::proxy_receive(server_key, client_key).await {
@@ -81,14 +91,12 @@ async fn recv_loop(res: &mut tide::Response, server_key: &str, client_key: &str)
                     break ;
                 }
             }
-            
         }
         websocket_channel::proxy_close(server_key, client_key).await;
         res.set_status(status);
         println!("body: {:?}", String::from_iter(body[..50].iter()));
-        
     } else {
         res.set_status(403);
     }
-    res.set_body(String::from_iter(body));
+    res.set_body(String::from_iter(body.clone()));
 }

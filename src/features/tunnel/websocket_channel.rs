@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-use async_std::{sync::Mutex, channel::{self, Receiver, Sender}};
+use async_std::{channel::{self, Receiver, Sender}, stream::StreamExt, sync::Mutex};
 use lazy_static::lazy_static;
-use std::collections::HashMap;
+use std::{collections::HashMap, time::{Duration, SystemTime}};
 
 use tide_websockets::WebSocketConnection;
 use crate::common::CommomResult;
@@ -14,7 +14,16 @@ type RequestChannel = (RequestSender, RequestReceiver);
 
 struct WebSocketChannel {
     ws_conn: WebSocketConnection,
-    proxy: HashMap<ShareKey, RequestChannel>
+    proxy: HashMap<ShareKey, RequestChannel>,
+    proxy_keys: HashMap<ShareKey, (SystemTime, Duration)>
+}
+
+impl Drop for WebSocketChannel {
+    fn drop(&mut self) {
+        self.proxy.clear();
+        self.proxy_keys.clear();
+        println!("web socket channel try drop");
+    }
 }
 
 pub enum WSChannelSendType {
@@ -30,10 +39,13 @@ impl WebSocketChannel {
         }
     }
 
-    pub async fn proxy_send(&self, client_key: &str, data: Vec<u8>) -> CommomResult<()> {
-
+    pub async fn proxy_send(&mut self, client_key: &str, data: Vec<u8>) -> CommomResult<()> {
         if let Some(proxy) = self.proxy.get(client_key) {
             proxy.0.send(data).await?;
+            let key = self.proxy_keys
+                .entry(client_key.to_owned())
+                .or_insert((SystemTime::now(), Duration::from_secs(60)));
+            (*key).0 = SystemTime::now();
         } else {
             eprintln!("send msg failed {:?}", client_key);
         }
@@ -42,16 +54,22 @@ impl WebSocketChannel {
 
     pub async fn proxy_add(&mut self, client_key: &str) {
         if !self.proxy.contains_key(client_key) {
-            eprintln!("open true");
             self.proxy.insert(client_key.to_string(), channel::unbounded());
-        } else {
-            eprintln!("open failed");
         }
+        let key = self.proxy_keys
+            .entry(client_key.to_owned())
+            .or_insert((SystemTime::now(), Duration::from_secs(10)));
+        (*key).0 = SystemTime::now();
+    }
+
+    pub fn proxy_keys(&self) -> HashMap<ShareKey, (SystemTime, Duration)> {
+        self.proxy_keys.clone()
     }
 
     pub async fn proxy_del(&mut self, client_key: &str) {
         if self.proxy.contains_key(client_key) {
             self.proxy.remove(client_key);
+            self.proxy_keys.remove(client_key);
         }
     }
 
@@ -89,7 +107,9 @@ impl WebSocketChannelPool {
 
 impl WebSocketChannelPool {
     pub fn add(&mut self, key: &str, conn: WebSocketConnection) {
-        self.inner.insert(key.to_string(), WebSocketChannel{ws_conn: conn, proxy: HashMap::new()});
+        self.inner.insert(key.to_string(), WebSocketChannel{
+            ws_conn: conn, proxy: HashMap::new(), proxy_keys: HashMap::new()
+        });
     }
 
     pub fn get(&self, key: &str) -> Option<&WebSocketChannel> {
@@ -101,7 +121,7 @@ impl WebSocketChannelPool {
     }
 
     pub fn del(&mut self, key: &str) {
-        self.inner.remove(key);
+        let _ = self.inner.remove(key).unwrap();
     }
 
     pub fn proxy_receiver(&self, server_key: &str, client_key: &str) -> Option<&Receiver<Vec<u8>>> {
@@ -112,7 +132,7 @@ impl WebSocketChannelPool {
     }
 
     pub async fn proxy_send(&mut self, server_key: &str, client_key: &str, data: Vec<u8>) -> CommomResult<()> {
-        match self.get(server_key) {
+        match self.get_mut(server_key) {
             Some(ws_channel) => ws_channel.proxy_send(client_key, data).await,
             None => Ok(()),
         }
@@ -121,7 +141,6 @@ impl WebSocketChannelPool {
     pub async fn proxy_open(&mut self, server_key: &str, client_key: &str) {
         match self.get_mut(server_key) {
             Some(ws_channel) => {
-                println!("oh ....");
                 ws_channel.proxy_add(client_key).await;
             },
             None => {
@@ -132,7 +151,7 @@ impl WebSocketChannelPool {
 
     pub async fn proxy_close(&mut self, server_key: &str, client_key: &str) {
         if self.proxy_status(server_key, client_key).await {
-            self.get_mut(server_key).unwrap().proxy_del(client_key);
+            self.get_mut(server_key).unwrap().proxy_del(client_key).await;
         }
     }
 
@@ -169,6 +188,10 @@ pub async fn proxy_open(server_key: &str, client_key: &str) {
 
 pub async fn proxy_close(server_key: &str, client_key: &str) {
     WS_CHANNEL.lock().await.proxy_close(server_key, client_key).await;
+}
+
+pub async fn proxy_close_expired() {
+    eprintln!("todo");
 }
 
 pub async fn proxy_receive<'a, 'b>(server_key: &'a str, client_key: &'a str) -> Option<Receiver<Vec<u8>>> {

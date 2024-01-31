@@ -80,7 +80,7 @@ pub fn main() {
                     *download,
                 ) {
                     Ok(()) => {},
-                    Err(e) => panic!("read dir item failed, {}", e)
+                    Err(e) => eprint!("read dir item failed, {}", e)
                 }
             },
             cli_enum::ReadFileInfo { file_path } => {

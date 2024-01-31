@@ -2,6 +2,8 @@
 1. 获取信息前需要验证 share_key 是否在线
 2. 调用信息有时不匹配
 3. 读取到的目录列表和实际目录不匹配(websocket 数据响应延迟导致)
+4. client: read-dir-item 当dir_path = /debug/client 报错：Bad file descript (os error 9)
+5. tunnel: 内存泄漏
 # 新功能
 1. server: 局域网内广播自己
 2. server: 验证 client_key 是否被授权
