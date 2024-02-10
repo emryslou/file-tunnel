@@ -1,7 +1,7 @@
 use std::{cmp::min, fs, io::{Read as _, Seek as _, SeekFrom}};
 
 use crate::{common::CommomResult, features::commands::{self, ApiCommand, CommandData, CommandMessage, DirItem}};
-use websocket::{Message, OwnedMessage};
+use websocket::OwnedMessage;
 use std::sync::mpsc::Sender;
 
 use super::{build_item, dir_iter};
@@ -53,7 +53,7 @@ pub fn handler(tx1: &Sender<OwnedMessage>, root_path: &str, client_key: &str, cm
             let mut file_path = file_path.clone();
             let org_root_path = file_path.root_path().clone();
             file_path.reset_root(&root_path);
-
+            log::debug!("read file info: {}", file_path.full_path());
             let message = CommandMessage {
                 version: cmd.version,
                 status: 0,
@@ -86,6 +86,7 @@ pub fn handler(tx1: &Sender<OwnedMessage>, root_path: &str, client_key: &str, cm
                     data_size: real_size,
                 },
             };
+            log::info!("file: {} ({}*{})", file_path, block_idx, block_size);
             send_message_text(tx1, client_key, message)?;
         }
         commands::Command::ReadPathInfo {
@@ -146,7 +147,7 @@ pub fn handler(tx1: &Sender<OwnedMessage>, root_path: &str, client_key: &str, cm
 
 pub fn send_message_text(tx: &Sender<OwnedMessage>, client_key: &str, message: CommandMessage) -> CommomResult<()>{
     let message = format!(
-        "{}:{}{}\0\0\0\0",
+        "{:03}{}{}\0\0\0\0",
         &client_key.len(),
         &client_key,
         serde_json::to_string(&message)?

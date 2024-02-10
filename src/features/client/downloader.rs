@@ -1,12 +1,14 @@
+use async_std::io::{self, WriteExt};
+use reqwest::blocking::Client;
 use sha256::try_digest;
-use std::{fs, io::{Seek, SeekFrom, Write}, path::PathBuf};
+use std::{fs, io::{Seek, SeekFrom, Write, self as stdio}, path::PathBuf};
 
 use crate::{
     common::{config::{Config, CFG_PATH}, utils, CommomResult},
     features::commands::{Command, CommandData, DirItem, DirItemInfo, FtPath, ApiCommand}
 };
 
-use super::api;
+use super::api::{self, RequestClient};
 
 
 pub fn download(cli_config: &mut Config, path: PathBuf, take_size: usize, skip_size: usize, download: bool) -> CommomResult<()> {
@@ -18,9 +20,12 @@ pub fn download(cli_config: &mut Config, path: PathBuf, take_size: usize, skip_s
             take_size, skip_size,
         }
     };
-    let message = api::do_http_request_data(cli_config, &cmd)?;
+    let http_cli = api::make_http_client(cli_config).unwrap();
+    log::info!("get file meta");
+    let message = api::do_http_request_data(&http_cli, &cmd)?;
     match message.data {
         CommandData::ReadDirItem { items, total, taked_size } => {
+            log::info!("get dir item");
             let _: Vec<_> = items.iter().map(|dir| {
                 let stat = if dir.path.exists() { "L" } else { "R" };
                 let mut item_type = "";
@@ -36,21 +41,20 @@ pub fn download(cli_config: &mut Config, path: PathBuf, take_size: usize, skip_s
                     }
                 }
                 if download && !dir.path.exists() {
-                    downloader(cli_config, dir).unwrap();
+                    downloader(&http_cli, dir, None).unwrap();
                 }
                 println!("{}--------- {} {} {}", item_type, size, dir.path.full_path(), stat);
             }).collect();
             println!("info: {}/{}", taked_size, total);
         },
-        CommandData::ReadFileInfo { item } => {
-            downloader(cli_config, &item)?
-        },
-        _data => eprintln!("response error")
+        CommandData::ReadFileInfo { item } => downloader(&http_cli, &item, None)?,
+        _data => eprintln!("response error: {_data:#?}")
     }
     Ok(())
 }
 
-fn downloader(cli_config: &mut Config, item: &DirItem) -> CommomResult<()> {
+fn downloader(http_cli: &RequestClient, item: &DirItem, replace: Option<bool>) -> CommomResult<()> {
+    log::debug!("match ...");
     match &item.info {
         DirItemInfo::File { modified_at, created_at, file_size, chksum } => {
             let block_size = 1 << 16;
@@ -58,10 +62,21 @@ fn downloader(cli_config: &mut Config, item: &DirItem) -> CommomResult<()> {
             if block_count * block_size < *file_size {
                 block_count += 1;
             }
+            log::info!("start download file {}", item.path().full_path());
             let mut file = if !item.path().exists() {
+                log::info!("file not found, creat it {}", item.path().full_path());
                 fs::File::create(item.path().full_path())?
             } else {
-                fs::File::open(item.path().full_path())?
+                if replace.unwrap_or(false) {
+                    let full_path = item.path().full_path();
+                    let mut new_path = full_path.clone();
+                    new_path.push_str(".bak");
+                    fs::rename(full_path, new_path)?;
+                    fs::File::create(item.path().full_path())?
+                } else {
+                    fs::File::open(item.path().full_path())?
+                }
+                
             };
             file.rewind()?;
 
@@ -69,6 +84,7 @@ fn downloader(cli_config: &mut Config, item: &DirItem) -> CommomResult<()> {
             let mut block_idx = 0;
             let max_err_retry_times = 3;
             let mut err_times = max_err_retry_times;
+            log::debug!("start download loop");
             while block_idx < block_count {
                 let cmd = ApiCommand {
                     version: 1,
@@ -78,7 +94,8 @@ fn downloader(cli_config: &mut Config, item: &DirItem) -> CommomResult<()> {
                         block_size: block_size as usize,
                     }
                 };
-                let message = api::do_http_request_data(cli_config, &cmd)?;
+                log::debug!("{}:({}/{})", item.path.full_path(), block_idx, block_count);
+                let message = api::do_http_request_data(&http_cli, &cmd)?;
 
                 match message.data {
                     CommandData::DownloadFile { data, data_size } => {
@@ -94,6 +111,7 @@ fn downloader(cli_config: &mut Config, item: &DirItem) -> CommomResult<()> {
                             let downloaded_size_er = utils::format_size(downloaded_size);
                             let total_size_er = utils::format_size(*file_size);
                             print!("{:<50}: [{}/{},{:>6}]\r", item.path().full_path(), downloaded_size_er, total_size_er, format!("{:.2}%", percent));
+                            stdio::stdout().flush().unwrap();
                         }
                         if data_size < block_size as usize {
                             let local_chksum = try_digest(item.path().full_path())?;

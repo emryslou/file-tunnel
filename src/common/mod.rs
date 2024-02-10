@@ -35,7 +35,16 @@ pub fn gen_uuid() -> String {
     uuid_slices.join("-")
 }
 
-pub type CommomResult<T> = Result<T, Box<dyn Error>>;
+pub type CommonErr = Box<dyn Error>;
+pub type CommomResult<T> = Result<T, CommonErr>;
+
+pub fn common_err(err_message: &str, err_kind: Option<std::io::ErrorKind>) -> CommonErr {
+    let err_kind = match err_kind {
+        Some(kind) => kind,
+        None => std::io::ErrorKind::Other,
+    };
+    Box::new(std::io::Error::new(err_kind, err_message))
+}
 
 pub mod config;
 pub mod utils;

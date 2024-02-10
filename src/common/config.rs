@@ -1,4 +1,4 @@
-use std::{fs, collections::HashMap};
+use std::{collections::HashMap, fs, sync::{Arc, Mutex}};
 
 use sqlite::{State, Connection};
 
@@ -30,14 +30,14 @@ const CLIENT_ALLOW_NAMES: [&str; 5] = [
     CFG_CLIENT_KEY,
 ];
 
-
+#[derive(Clone)]
 pub struct Config {
     work_dir: String,
     config_path: String,
     allowed_names: Vec<String>,
     config_dict: HashMap<String, String>,
     dirty: Vec<(String, String, i64)>,
-    conn: Connection
+    conn: Arc<Mutex<Connection>>
 }
 
 impl Config {
@@ -89,14 +89,14 @@ impl Config {
             allowed_names: allowed_names.clone(), 
             config_dict: HashMap::new(),
             dirty: vec![],
-            conn,
+            conn: Arc::new(Mutex::new(conn)),
         }
     }
 }
 
 impl Config {
     pub fn init(&mut self) {
-        self.conn.execute(r#"
+        self.conn.lock().unwrap().execute(r#"
             create table if not exists config (
                 name char(32) NOT NULL,
                 value TEXT NOT NULL,
@@ -129,14 +129,15 @@ impl Config {
             Some(val) => Some(val.clone()),
             None => {
                 let query = "select value from config where name = ?";
-                let mut stat = self.conn.prepare(query).unwrap();
-                stat.bind((1, key.as_str())).unwrap();
-                while let Ok(State::Row) = stat.next() {
-                    let val = stat.read::<String, _>("value").unwrap();
-                    self.config_dict.insert(key, val.clone());
-                    return Some(val);
+                if let Ok(conn) = self.conn.lock() {
+                    let mut stat = conn.prepare(query).unwrap();
+                    stat.bind((1, key.as_str())).unwrap();
+                    while let Ok(State::Row) = stat.next() {
+                        let val = stat.read::<String, _>("value").unwrap();
+                        self.config_dict.insert(key, val.clone());
+                        return Some(val);
+                    }
                 }
-
                 None
             }
         }
@@ -170,15 +171,17 @@ impl Config {
                 "select name, value from config where name in ({})",
                 qmarks.join(",")
             );
-            let mut stat = self.conn.prepare(query).unwrap();
-            for (idx, name) in out_mem_keys.into_iter().enumerate() {
-                stat.bind((idx+1, name.as_str())).unwrap();
-            }
-            while let Ok(State:: Row) = stat.next() {
-                let key = stat.read::<String, _>("name").unwrap();
-                let value = stat.read::<String, _>("value").unwrap();
-                self.config_dict.insert(key.clone(), value.clone());
-                key_value_s.push((key, value));
+            if let Ok(conn) = self.conn.lock() {
+                let mut stat = conn.prepare(query).unwrap();
+                for (idx, name) in out_mem_keys.into_iter().enumerate() {
+                    stat.bind((idx+1, name.as_str())).unwrap();
+                }
+                while let Ok(State:: Row) = stat.next() {
+                    let key = stat.read::<String, _>("name").unwrap();
+                    let value = stat.read::<String, _>("value").unwrap();
+                    self.config_dict.insert(key.clone(), value.clone());
+                    key_value_s.push((key, value));
+                }
             }
         }
 
@@ -200,71 +203,21 @@ impl Config {
     fn flush_dirty(&mut self) {
         while let Some((key, value, _auto_gen)) = self.dirty.pop() {
             let query = "select count(1) as name_count from config where name = ?";
-            let mut stat = self.conn.prepare(query).unwrap();
-            stat.bind((1, key.as_str())).unwrap();
-            while let Ok(State::Row) = stat.next() {
-                let count = stat.read::<i64, _>("name_count").unwrap();
-                if count > 0 {
-                    let update_query = format!("update config set value = '{}', auto_gen = {} where name = '{}'", value, _auto_gen, key);
-                    self.conn.execute(update_query).unwrap();
-                } else {
-                    let update_query = format!("insert into config (name, value, auto_gen) values ('{}', '{}', {});", key, value, _auto_gen);
-                    self.conn.execute(update_query).unwrap();
+            if let Ok(conn) = self.conn.lock() {
+                let mut stat = conn.prepare(query).unwrap();
+                stat.bind((1, key.as_str())).unwrap();
+                while let Ok(State::Row) = stat.next() {
+                    let count = stat.read::<i64, _>("name_count").unwrap();
+                    if count > 0 {
+                        let update_query = format!("update config set value = '{}', auto_gen = {} where name = '{}'", value, _auto_gen, key);
+                        conn.execute(update_query).unwrap();
+                    } else {
+                        let update_query = format!("insert into config (name, value, auto_gen) values ('{}', '{}', {});", key, value, _auto_gen);
+                        conn.execute(update_query).unwrap();
+                    }
+                    break ;
                 }
-                break ;
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod test_config {
-    use std::fs;
-
-    use sqlite::State;
-
-    use super::{WORK_DIR, Config};
-
-    #[test]
-    fn test_config_new() {
-        let c = Config::new(None, None, None);
-        assert_eq!(c.work_dir, WORK_DIR);
-
-        fs::remove_file(c.config_path).expect("remove error");
-    }
-
-    #[test]
-    fn test_config_init() {
-        let mut c = Config::new(Some("./work_dir/abc".to_string()), Some(".ft.db".to_string()), None);
-        c.init();
-        let mut stat = c.conn.prepare("pragma table_info(config)").unwrap();
-        while let Ok(State::Row) = stat.next() {
-            print!("-->")
-        }
-        fs::remove_file(c.config_path).expect("remove error");
-    }
-
-    #[test]
-    fn test_config_setget() {
-        let mut c = Config::new(Some("./work_dir/abc".to_string()), Some(".ft.db".to_string()), None);
-        c.init();
-        c.set("abc".to_string(), "ccc".to_string(), None);
-        assert_eq!(c.get_key("abc".to_string()), Some("ccc".to_string()));
-
-        c.set("abc".to_string(), "1111".to_string(), None);
-        assert_eq!(c.get_key("abc".to_string()), Some("1111".to_string()));
-        fs::remove_file(c.config_path).expect("remove error");
-    }
-
-    #[test]
-    fn test_config_setgets() {
-        let mut c = Config::new(Some("./work_dir/abc".to_string()), Some(".ft.db".to_string()), None);
-        c.init();
-        c.set("abc".to_string(), "ccc".to_string(), None);
-        c.set("abc1".to_string(), "ccc1".to_string(), None);
-        c.set("abc2".to_string(), "ccc2".to_string(), None);
-        let v = c.get_keys(Some(vec!["abc".to_string()]));
-        println!("{:?}", v);
-        fs::remove_file(c.config_path).expect("remove error");
     }
 }

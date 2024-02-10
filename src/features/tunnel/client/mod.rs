@@ -1,102 +1,80 @@
+use actix_web::{web, Error, HttpRequest, HttpResponse, Scope};
+use reqwest::StatusCode;
 use tokio::time::{timeout_at, Instant};
-use tide::Request;
 use std::time::Duration;
 
-use crate::features::commands::{CommandData, CommandMessage};
+use crate::features::{
+    commands::ApiCommand,
+    tunnel::app_state::ProxyMessage
+};
 
-use super::websocket_channel;
+use super::app_state::AppState;
 
-pub fn binding(app: &mut tide::Server<()>) {
-    app.at("/client").nest({
-        let mut client = tide::new();
-        client.at("/data").post(receive_data);
-        client.at("/proxy/close").get(proxy_close_expired);
-        client
-    });
+pub(crate) fn scope(root_path: &str) -> Scope {
+    web::scope(root_path)
+        .route("/data", web::post().to(cli_data))
 }
 
-async fn receive_data(mut req: Request<()>) -> tide::Result {
-    let server_key = if let Some(server_keys) = req.header("X-Server-Key") {
-         server_keys.get(0).unwrap().to_string()
-    } else { "".to_string() };
-    let client_key = if let Some(client_keys) = req.header("X-Client-Key") {
-         client_keys.get(0).unwrap().to_string()
-    } else { "".to_string() };
-    println!("host: {}", req.host().unwrap());
+async fn cli_data(req: HttpRequest, cmd: web::Json<ApiCommand>, state: web::Data<AppState>) -> Result<HttpResponse, Error> {
+    let server_key: &str = if let Some(server_key) = req.headers().get("X-Server-Key") {
+         server_key.to_str().unwrap_or("")
+    } else { "" };
+    let client_key = if let Some(client_key) = req.headers().get("X-Client-Key") {
+         client_key.to_str().unwrap_or("")
+    } else { "" };
     
-    let mut res = tide::Response::new(401);
-    match (server_key.as_str(), client_key.as_str()) {
-        ("", "") | ("", _) | (_, "") => res.set_body("server or client key required"),
-        keys => {
-            let ws_cmd = req.body_string().await.unwrap();
-            if let Some(_) = websocket_channel::get(keys.0).await {
-                websocket_channel::websocket_send_text(keys.0, keys.1, ws_cmd).await;
-                websocket_channel::proxy_open(keys.0, keys.1).await;
-                if let Err(_)  = timeout_at(
-                    Instant::now() + Duration::from_secs(60), 
-                    recv_loop(&mut res, keys.0, keys.1)
-                ).await {
-                    res.set_status(502);
-                        let data = CommandMessage {
-                        version: 1,
-                        status: 403,
-                        data: CommandData::Error { message: "receving data from server time out".to_string()},
+    match (server_key, client_key) {
+        ("", "") => {
+            let err = std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "server key must be required"
+            );
+            Err(actix_web::Error::from(err))
+        },
+        srv_cli_keys => {
+            state.client_open(srv_cli_keys);
+            let req_msg = format!("{:03}{}{}", srv_cli_keys.1.len(), srv_cli_keys.1, serde_json::to_string(&cmd).unwrap());
+            match state.server_send_text(srv_cli_keys.0, &req_msg) {
+                Ok(_) => {
+                    let mut body = vec![];
+                    let mut resp = match timeout_at(Instant::now() + Duration::from_secs(4), async {
+                        match state.client_receiver(srv_cli_keys.1) {
+                            Some(recver) => {
+                                while let Ok(message) = recver.recv() {
+                                    let recv_msg = match message {
+                                        ProxyMessage::Text(text) => {
+                                            text.as_bytes().to_vec()
+                                        },
+                                        ProxyMessage::Binary(bin) => bin,
+                                    };
+                                    if recv_msg.len() > 0 {
+                                        body.extend(recv_msg.iter());
+                                        if body.ends_with(b"\0\0\0\0") {
+                                            body = body[..(body.len() - 4)].to_vec();
+                                            break ;
+                                        }
+                                    }
+                                }
+                                HttpResponse::Ok()
+                            },
+                            None => {
+                                body.extend(format!("client key {} may be offline", srv_cli_keys.1).as_bytes().iter());
+                                HttpResponse::NotFound()
+                            }
+                        } 
+                    }).await {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            body.extend(e.to_string().as_bytes());
+                            HttpResponse::GatewayTimeout()
+                        }
                     };
-                    res.set_body(serde_json::to_string(&data).unwrap());    
-                }
-            } else {
-                res.set_status(403);
-                let data = CommandMessage {
-                    version: 1,
-                    status: 403,
-                    data: CommandData::Error { message: "share key may be off line".to_string()},
-                };
-                res.set_body(serde_json::to_string(&data).unwrap());
-            }
-        }
-    }
-    
-    Ok(res)
-}
-
-async fn proxy_close_expired(mut _req: Request<()>) -> tide::Result {
-    if let Some(server_keys) = _req.header("X-Server-Key") {
-         server_keys.get(0).unwrap().to_string()
-    } else { "".to_string() };
-    websocket_channel::proxy_close_expired().await;
-    Ok("".into())
-}
-
-async fn recv_loop(res: &mut tide::Response, server_key: &str, client_key: &str) {
-    let mut body: Vec<char> = vec![];
-    if let Some(receiver) = websocket_channel::proxy_receive(server_key, client_key).await {
-        let postfix = [0u8; 4];
-        let mut status = 200;
-        loop {
-            match receiver.recv().await {
-                Ok(data) => {
-                    let chars: Vec<char> = data.iter().map(|b| *b as char).collect();
-                    if data.ends_with(&postfix) {
-                        body.extend(chars[..(chars.len() - postfix.len())].iter());
-                        break ;
-                    } else {
-                        body.extend(chars.iter());
-                    }
+                    Ok(resp.body(body))
                 },
-                Err(_e) => {
-                    status = 500;
-                    let msg = "receive msg failed";
-                    body.extend(msg.chars());
-                    eprintln!("{}{}", msg, _e.to_string());
-                    break ;
-                }
+                Err(e) => {
+                    Err(actix_web::Error::from(e))
+                },
             }
         }
-        websocket_channel::proxy_close(server_key, client_key).await;
-        res.set_status(status);
-        println!("body: {:?}", String::from_iter(body[..50].iter()));
-    } else {
-        res.set_status(403);
     }
-    res.set_body(String::from_iter(body.clone()));
 }

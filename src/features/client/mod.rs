@@ -1,6 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{path::{Path, PathBuf}, str::FromStr};
 
 use clap::Parser;
+use reqwest::blocking::Client;
 
 use crate::{
     common::{config::{self, Config, CFG_PATH}, gen_uuid, utils}, 
@@ -21,6 +22,8 @@ pub fn main() {
     );
     cli_config.init();
     if let Some(cmd) = &cli.command {
+        let mut new_config = cli_config.clone();
+        let mut http_cli = api::make_http_client(&mut new_config).unwrap();
         match cmd {    
             cli_enum::SetLocalConfig { 
                 share_key, 
@@ -66,7 +69,7 @@ pub fn main() {
                     version: 1,
                     command: commands::Command::ReadConfig {  }
                 };
-                match api::do_http_request(&mut cli_config, &cmd) {
+                match api::do_http_request(&http_cli, &cmd) {
                     Ok(result) => println!("server config: {}", String::from_iter(result.iter())),
                     Err(err) => eprintln!("error: {}", err.to_string()),
                 }
@@ -92,7 +95,7 @@ pub fn main() {
                     }
                 };
 
-                match api::do_http_request_data(&mut cli_config, &cmd) {
+                match api::do_http_request_data(&http_cli, &cmd) {
                     Ok(message) => match message.data {
                         CommandData::DownloadFile { data, data_size } => {
 
@@ -104,18 +107,13 @@ pub fn main() {
             },
             cli_enum::DownloadFile { file_path, block_size, block_idx } => {
                 let root_path = cli_config.get_key(CFG_PATH.to_string()).unwrap_or("/".to_string());
-                let cmd = ApiCommand {
-                    version: 1,
-                    command: commands::Command::DownloadFile { 
-                        file_path: FtPath::new_relative(root_path, file_path.clone()),
-                        block_idx: *block_idx,
-                        block_size: *block_size,
-                    }
-                };
+                let fpath = FtPath::new_relative(root_path, file_path.clone());
 
-                if let Ok(result) = api::do_http_request(&mut cli_config, &cmd) {
-                    println!("result: {}", String::from_iter(result.iter()));
+                match downloader::download(&mut cli_config, PathBuf::from_str(&file_path).unwrap(), 0, 0, true) {
+                    Ok(_) => println!("download file {} done", fpath.full_path()),
+                    Err(e) => eprintln!("download file {} failed msg: {}", fpath.full_path(), e.to_string())
                 }
+                
             }
         }
     }

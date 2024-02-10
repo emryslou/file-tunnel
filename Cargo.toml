@@ -9,16 +9,19 @@ edition = "2021"
 name = "common"
 path = "src/mod.rs"
 
-
 [dependencies]
 # https://github.com/flosse/rust-web-framework-comparison
+actix = { version = "0.13" }
 actix-web = { version = "4" } # https://actix.rs/docs/getting-started
+actix-web-actors = { version = "4.3" }
 async-channel = { version = "2.1" }
 async-std = { version = "1.8.0", features = ["attributes", "tokio1"] }
 clap ={ version = "4.4.13", features = ["derive", "env"] }
 chrono = { version = "0.4" }
 dirs = { version = "5.0" }
+env_logger ={ version = "0.10" }
 lazy_static = { version = "1.4" }
+log ={ version = "0.4"}
 once_cell = { version = "1.19" }
 rand ={ version = "*" }
 reqwest = { version = "0.11", features = ["blocking"]}
